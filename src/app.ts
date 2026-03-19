@@ -3,6 +3,7 @@ import cors from "cors";
 import * as dotenv from "dotenv";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
+import pool from "./config/db";
 
 dotenv.config();
 
