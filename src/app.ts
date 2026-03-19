@@ -38,6 +38,23 @@ app.get("/", (req, res) => {
   res.send("Hello");
 });
 
+// test db connection
+app.get("/db-test", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT NOW()");
+    res.json({
+      success: true,
+      time: result.rows[0],
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      success: false,
+      error: err.message,
+    });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`server is running at port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
