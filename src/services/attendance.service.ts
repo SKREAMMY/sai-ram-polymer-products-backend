@@ -1,175 +1,128 @@
 import { withTransaction, query } from "../config/db";
 import {
-  AttendanceLog,
-  AttendanceCalculation,
-  CreateAttendanceLogDTO,
-  UpdateAttendanceLogDTO,
-  BulkAttendanceDTO,
-  ShiftRule,
-  Employee,
-  SalaryRecord,
+  CreateAttendanceDTO,
+  UpdateAttendanceDTO,
   GeneratePayrollDTO,
-  AttendanceFilters,
+  DayCalculation,
+  AttendanceLog,
+  SalaryRecord,
   PaginatedResult,
 } from "../types/attendance.types";
 
-// ── Time helpers ───────────────────────────────────────────────────────────
+const DEFAULT_WORKING_DAYS = 26;
+const HOURS_PER_DAY = 8;
 
-/**
- * Parse "HH:MM" or "HH:MM:SS" into total minutes from midnight.
- */
-function timeToMinutes(time: string): number {
-  const [h, m] = time.split(":").map(Number);
-  return h * 60 + m;
-}
+// ── Core calculation (pure function) ──────────────────────────────────────
+//
+//   monthly_salary / working_days_in_month = daily_rate
+//   daily_rate / 8                         = hourly_rate
+//   hourly_rate * hours_worked             = day_pay
 
-/**
- * Difference between two "HH:MM" strings in decimal hours.
- * e.g. "09:30", "18:15" → 8.75
- */
-function hoursBetween(start: string, end: string): number {
-  return (timeToMinutes(end) - timeToMinutes(start)) / 60;
-}
-
-// ── Core calculation (pure function — easy to unit test) ──────────────────
-
-/**
- * Given a shift rule and raw clock times, compute all pay fields.
- * This is the single source of truth for salary math.
- * The same logic is mirrored in the frontend salary.utils.ts for live previews.
- */
-export function calculateAttendance(
-  shift: ShiftRule,
+export function calculateDayPay(
+  monthlySalary: number,
+  workingDaysInMonth: number,
   clockIn: string,
-  clockOut: string,
-  hourlyRate: number
-): AttendanceCalculation {
-  const hours_worked = Math.max(0, hoursBetween(clockIn, clockOut));
+  clockOut: string
+): DayCalculation {
+  const [inH, inM] = clockIn.split(":").map(Number);
+  const [outH, outM] = clockOut.split(":").map(Number);
 
-  // Late minutes: how many minutes after shift_start did the employee clock in
-  const shiftStartMins = timeToMinutes(shift.shift_start);
-  const clockInMins = timeToMinutes(clockIn);
-  const late_minutes = Math.max(0, clockInMins - shiftStartMins);
+  const totalInMins = inH * 60 + inM;
+  const totalOutMins = outH * 60 + outM;
+  const hours_worked = Math.max(0, (totalOutMins - totalInMins) / 60);
 
-  // Overtime hours: hours worked beyond the overtime threshold
-  const overtime_hours = Math.max(0, hours_worked - shift.overtime_threshold);
-
-  // Regular hours (capped at threshold)
-  const regular_hours = Math.min(hours_worked, shift.overtime_threshold);
-
-  // Pay components
-  const base_pay = regular_hours * hourlyRate;
-  const overtime_pay = overtime_hours * hourlyRate * shift.overtime_multiplier;
-  const deduction_amount = late_minutes * shift.late_deduction_per_min;
-
-  const gross_pay = Math.max(0, base_pay + overtime_pay - deduction_amount);
+  const daily_rate = monthlySalary / workingDaysInMonth;
+  const hourly_rate = daily_rate / HOURS_PER_DAY;
+  const day_pay = Math.round(hourly_rate * hours_worked * 100) / 100;
 
   return {
     hours_worked: Math.round(hours_worked * 100) / 100,
-    late_minutes: Math.round(late_minutes * 100) / 100,
-    overtime_hours: Math.round(overtime_hours * 100) / 100,
-    deduction_amount: Math.round(deduction_amount * 100) / 100,
-    overtime_pay: Math.round(overtime_pay * 100) / 100,
-    gross_pay: Math.round(gross_pay * 100) / 100,
+    working_days_in_month: workingDaysInMonth,
+    monthly_salary: monthlySalary,
+    daily_rate: Math.round(daily_rate * 100) / 100,
+    hourly_rate: Math.round(hourly_rate * 100) / 100,
+    day_pay,
   };
 }
 
-// ── Repository helpers (private) ──────────────────────────────────────────
-
-async function fetchEmployeeWithShift(
-  employeeId: string
-): Promise<Employee & { shift: ShiftRule }> {
-  const { rows } = await query(
-    `
-    SELECT
-      e.*,
-      row_to_json(s) AS shift
-    FROM employees e
-    LEFT JOIN shift_rules s ON s.id = e.shift_id
-    WHERE e.id = $1 AND e.is_active = TRUE
-  `,
-    [employeeId]
-  );
-
-  if (!rows[0]) throw new Error(`Employee ${employeeId} not found or inactive`);
-  if (!rows[0].shift)
-    throw new Error(`Employee ${employeeId} has no shift assigned`);
-  return rows[0];
-}
-
-// ── Public service methods ─────────────────────────────────────────────────
+// ── Create attendance log ──────────────────────────────────────────────────
 
 export async function createAttendanceLog(
-  dto: CreateAttendanceLogDTO,
+  dto: CreateAttendanceDTO,
   actorId: string
 ): Promise<AttendanceLog> {
   return withTransaction(async (client) => {
-    // Prevent duplicate entry for the same day
     const { rows: existing } = await client.query(
       "SELECT id FROM attendance_logs WHERE employee_id = $1 AND log_date = $2",
       [dto.employee_id, dto.log_date]
     );
     if (existing.length > 0) {
       throw new Error(
-        `Attendance already logged for employee ${dto.employee_id} on ${dto.log_date}`
+        `Attendance already logged for this employee on ${dto.log_date}`
       );
     }
 
-    const employee = await fetchEmployeeWithShift(dto.employee_id);
+    const { rows: empRows } = await client.query(
+      "SELECT id, monthly_salary FROM employees WHERE id = $1 AND is_active = TRUE",
+      [dto.employee_id]
+    );
+    if (!empRows[0]) throw new Error("Employee not found or inactive");
 
-    // Zero-out fields for absent / leave
-    let calc: AttendanceCalculation = {
+    const monthlySalary = Number(empRows[0].monthly_salary);
+    const workingDaysInMonth =
+      dto.working_days_in_month ?? DEFAULT_WORKING_DAYS;
+
+    let calc: DayCalculation = {
       hours_worked: 0,
-      late_minutes: 0,
-      overtime_hours: 0,
-      deduction_amount: 0,
-      overtime_pay: 0,
-      gross_pay: 0,
+      working_days_in_month: workingDaysInMonth,
+      monthly_salary: monthlySalary,
+      daily_rate: Math.round((monthlySalary / workingDaysInMonth) * 100) / 100,
+      hourly_rate:
+        Math.round((monthlySalary / workingDaysInMonth / HOURS_PER_DAY) * 100) /
+        100,
+      day_pay: 0,
     };
 
-    if (dto.status !== "absent" && dto.status !== "leave") {
+    if (dto.status === "present") {
       if (!dto.clock_in || !dto.clock_out) {
         throw new Error(
-          "clock_in and clock_out are required for present/late/half_day"
+          "clock_in and clock_out are required for present status"
         );
       }
-      calc = calculateAttendance(
-        employee.shift,
+      calc = calculateDayPay(
+        monthlySalary,
+        workingDaysInMonth,
         dto.clock_in,
-        dto.clock_out,
-        Number(employee.hourly_rate)
+        dto.clock_out
       );
     }
 
     const { rows } = await client.query(
       `
       INSERT INTO attendance_logs (
-        employee_id, shift_id, log_date,
-        clock_in, clock_out,
-        hours_worked, late_minutes, overtime_hours,
-        deduction_amount, overtime_pay, gross_pay,
+        employee_id, log_date,
+        clock_in, clock_out, hours_worked,
+        working_days_in_month, monthly_salary, daily_rate, hourly_rate, day_pay,
         status, notes, created_by
       ) VALUES (
-        $1, $2, $3,
-        $4, $5,
-        $6, $7, $8,
-        $9, $10, $11,
-        $12, $13, $14
+        $1, $2,
+        $3, $4, $5,
+        $6, $7, $8, $9, $10,
+        $11, $12, $13
       )
       RETURNING *
     `,
       [
         dto.employee_id,
-        employee.shift_id,
         dto.log_date,
         dto.clock_in ?? null,
         dto.clock_out ?? null,
         calc.hours_worked,
-        calc.late_minutes,
-        calc.overtime_hours,
-        calc.deduction_amount,
-        calc.overtime_pay,
-        calc.gross_pay,
+        calc.working_days_in_month,
+        calc.monthly_salary,
+        calc.daily_rate,
+        calc.hourly_rate,
+        calc.day_pay,
         dto.status,
         dto.notes ?? null,
         actorId,
@@ -180,9 +133,11 @@ export async function createAttendanceLog(
   });
 }
 
+// ── Update attendance log ──────────────────────────────────────────────────
+
 export async function updateAttendanceLog(
   logId: string,
-  dto: UpdateAttendanceLogDTO,
+  dto: UpdateAttendanceDTO,
   actorId: string
 ): Promise<AttendanceLog> {
   return withTransaction(async (client) => {
@@ -190,61 +145,71 @@ export async function updateAttendanceLog(
       "SELECT * FROM attendance_logs WHERE id = $1",
       [logId]
     );
-    if (!existing[0]) throw new Error(`Attendance log ${logId} not found`);
+    if (!existing[0]) throw new Error("Attendance log not found");
 
-    const current: AttendanceLog = existing[0];
+    const current = existing[0];
     const newStatus = dto.status ?? current.status;
-    const newClockIn = dto.clock_in ?? current.clock_in ?? undefined;
-    const newClockOut = dto.clock_out ?? current.clock_out ?? undefined;
+    const newClockIn = dto.clock_in ?? current.clock_in;
+    const newClockOut = dto.clock_out ?? current.clock_out;
+    const workingDays =
+      dto.working_days_in_month ?? current.working_days_in_month;
 
-    let calc: AttendanceCalculation = {
+    const { rows: empRows } = await client.query(
+      "SELECT monthly_salary FROM employees WHERE id = $1",
+      [current.employee_id]
+    );
+    const monthlySalary = Number(empRows[0].monthly_salary);
+
+    let calc: DayCalculation = {
       hours_worked: 0,
-      late_minutes: 0,
-      overtime_hours: 0,
-      deduction_amount: 0,
-      overtime_pay: 0,
-      gross_pay: 0,
+      working_days_in_month: workingDays,
+      monthly_salary: monthlySalary,
+      daily_rate: Math.round((monthlySalary / workingDays) * 100) / 100,
+      hourly_rate:
+        Math.round((monthlySalary / workingDays / HOURS_PER_DAY) * 100) / 100,
+      day_pay: 0,
     };
 
-    if (newStatus !== "absent" && newStatus !== "leave") {
+    if (newStatus === "present") {
       if (!newClockIn || !newClockOut) {
-        throw new Error("clock_in and clock_out required for this status");
+        throw new Error(
+          "clock_in and clock_out are required for present status"
+        );
       }
-      const employee = await fetchEmployeeWithShift(current.employee_id);
-      calc = calculateAttendance(
-        employee.shift,
+      calc = calculateDayPay(
+        monthlySalary,
+        workingDays,
         newClockIn,
-        newClockOut,
-        Number(employee.hourly_rate)
+        newClockOut
       );
     }
 
     const { rows } = await client.query(
       `
       UPDATE attendance_logs SET
-        clock_in         = $1,
-        clock_out        = $2,
-        hours_worked     = $3,
-        late_minutes     = $4,
-        overtime_hours   = $5,
-        deduction_amount = $6,
-        overtime_pay     = $7,
-        gross_pay        = $8,
-        status           = $9,
-        notes            = $10,
-        updated_by       = $11
+        clock_in              = $1,
+        clock_out             = $2,
+        hours_worked          = $3,
+        working_days_in_month = $4,
+        monthly_salary        = $5,
+        daily_rate            = $6,
+        hourly_rate           = $7,
+        day_pay               = $8,
+        status                = $9,
+        notes                 = $10,
+        updated_by            = $11
       WHERE id = $12
       RETURNING *
     `,
       [
-        newStatus !== "absent" && newStatus !== "leave" ? newClockIn : null,
-        newStatus !== "absent" && newStatus !== "leave" ? newClockOut : null,
+        newStatus === "present" ? newClockIn : null,
+        newStatus === "present" ? newClockOut : null,
         calc.hours_worked,
-        calc.late_minutes,
-        calc.overtime_hours,
-        calc.deduction_amount,
-        calc.overtime_pay,
-        calc.gross_pay,
+        calc.working_days_in_month,
+        calc.monthly_salary,
+        calc.daily_rate,
+        calc.hourly_rate,
+        calc.day_pay,
         newStatus,
         dto.notes ?? current.notes,
         actorId,
@@ -256,30 +221,7 @@ export async function updateAttendanceLog(
   });
 }
 
-export async function bulkCreateAttendance(
-  dto: BulkAttendanceDTO,
-  actorId: string
-): Promise<{
-  success: number;
-  failed: Array<{ employee_id: string; error: string }>;
-}> {
-  let success = 0;
-  const failed: Array<{ employee_id: string; error: string }> = [];
-
-  for (const entry of dto.entries) {
-    try {
-      await createAttendanceLog({ ...entry, log_date: dto.log_date }, actorId);
-      success++;
-    } catch (err: unknown) {
-      failed.push({
-        employee_id: entry.employee_id,
-        error: err instanceof Error ? err.message : "Unknown error",
-      });
-    }
-  }
-
-  return { success, failed };
-}
+// ── Get daily attendance (all employees for one date) ─────────────────────
 
 export async function getDailyAttendance(
   date: string
@@ -301,52 +243,35 @@ export async function getDailyAttendance(
   `,
     [date]
   );
-
   return rows;
 }
 
+// ── Get attendance for one employee (date range) ───────────────────────────
+
 export async function getEmployeeAttendance(
   employeeId: string,
-  filters: AttendanceFilters,
-  pagination: { page: number; limit: number }
+  from: string,
+  to: string,
+  page: number,
+  limit: number
 ): Promise<PaginatedResult<AttendanceLog>> {
-  const { page, limit } = pagination;
   const offset = (page - 1) * limit;
 
-  const params: unknown[] = [employeeId];
-  const conditions: string[] = ["al.employee_id = $1"];
-
-  if (filters.date_from) {
-    params.push(filters.date_from);
-    conditions.push(`al.log_date >= $${params.length}`);
-  }
-  if (filters.date_to) {
-    params.push(filters.date_to);
-    conditions.push(`al.log_date <= $${params.length}`);
-  }
-  if (filters.status) {
-    params.push(filters.status);
-    conditions.push(`al.status = $${params.length}`);
-  }
-
-  const where = conditions.join(" AND ");
-
   const { rows: countRows } = await query(
-    `SELECT COUNT(*) FROM attendance_logs al WHERE ${where}`,
-    params
+    `SELECT COUNT(*) FROM attendance_logs
+     WHERE employee_id = $1 AND log_date BETWEEN $2 AND $3`,
+    [employeeId, from, to]
   );
   const total = Number(countRows[0].count);
 
-  params.push(limit, offset);
   const { rows } = await query(
     `
-    SELECT al.*
-    FROM attendance_logs al
-    WHERE ${where}
-    ORDER BY al.log_date DESC
-    LIMIT $${params.length - 1} OFFSET $${params.length}
+    SELECT * FROM attendance_logs
+    WHERE employee_id = $1 AND log_date BETWEEN $2 AND $3
+    ORDER BY log_date DESC
+    LIMIT $4 OFFSET $5
   `,
-    params
+    [employeeId, from, to, limit, offset]
   );
 
   return {
@@ -358,115 +283,101 @@ export async function getEmployeeAttendance(
   };
 }
 
-// ── Payroll generation ─────────────────────────────────────────────────────
+// ── Generate monthly payroll ───────────────────────────────────────────────
 
 export async function generatePayroll(
   dto: GeneratePayrollDTO,
   actorId: string
 ): Promise<SalaryRecord[]> {
   return withTransaction(async (client) => {
-    // Get target employees — all active employees or a specified subset
-    let employeeQuery = `
-      SELECT id, hourly_rate, full_name FROM employees WHERE is_active = TRUE
-    `;
-    const employeeParams: unknown[] = [];
+    const periodLabel = `${dto.period_year}-${String(dto.period_month).padStart(
+      2,
+      "0"
+    )}`;
+    const periodStart = `${periodLabel}-01`;
+    const periodEnd = new Date(dto.period_year, dto.period_month, 0)
+      .toISOString()
+      .slice(0, 10);
 
+    let empQuery =
+      "SELECT id, full_name, monthly_salary FROM employees WHERE is_active = TRUE";
+    const empParams: unknown[] = [];
     if (dto.employee_ids && dto.employee_ids.length > 0) {
-      employeeParams.push(dto.employee_ids);
-      employeeQuery += ` AND id = ANY($1)`;
+      empParams.push(dto.employee_ids);
+      empQuery += " AND id = ANY($1)";
     }
 
-    const { rows: employees } = await client.query(
-      employeeQuery,
-      employeeParams
-    );
+    const { rows: employees } = await client.query(empQuery, empParams);
     if (employees.length === 0) throw new Error("No active employees found");
 
     const results: SalaryRecord[] = [];
 
     for (const emp of employees) {
-      // Aggregate attendance_logs for this employee and period
+      const monthlySalary = Number(emp.monthly_salary);
+      const daily_rate =
+        Math.round((monthlySalary / dto.working_days_in_month) * 100) / 100;
+      const hourly_rate = Math.round((daily_rate / 8) * 100) / 100;
+
       const { rows: agg } = await client.query(
         `
         SELECT
-          COUNT(*) FILTER (WHERE status = 'present')  AS days_present,
-          COUNT(*) FILTER (WHERE status = 'late')     AS days_late,
-          COUNT(*) FILTER (WHERE status = 'absent')   AS days_absent,
-          COUNT(*) FILTER (WHERE status = 'leave')    AS days_leave,
-          COUNT(*) FILTER (WHERE status = 'half_day') AS days_half_day,
-          COALESCE(SUM(hours_worked),     0)  AS total_hours,
-          COALESCE(SUM(overtime_hours),   0)  AS overtime_hours,
-          COALESCE(SUM(gross_pay),        0)  AS gross_pay,
-          COALESCE(SUM(overtime_pay),     0)  AS total_overtime_pay,
-          COALESCE(SUM(deduction_amount), 0)  AS total_deductions
+          COUNT(*) FILTER (WHERE status = 'present') AS days_present,
+          COUNT(*) FILTER (WHERE status = 'absent')  AS days_absent,
+          COUNT(*) FILTER (WHERE status = 'leave')   AS days_leave,
+          COALESCE(SUM(hours_worked), 0)             AS total_hours,
+          COALESCE(SUM(day_pay), 0)                  AS gross_pay
         FROM attendance_logs
         WHERE employee_id = $1
           AND log_date BETWEEN $2 AND $3
       `,
-        [emp.id, dto.period_start, dto.period_end]
+        [emp.id, periodStart, periodEnd]
       );
 
       const a = agg[0];
-      const base_pay = Number(a.total_hours) * Number(emp.hourly_rate);
-      const gross_pay = Number(a.gross_pay);
-      const net_pay = Math.max(0, gross_pay);
 
-      // Upsert: regenerating for the same period replaces the old draft
       const { rows } = await client.query(
         `
         INSERT INTO salary_records (
-          employee_id, period_start, period_end,
-          total_days_present, total_days_absent, total_days_leave,
-          total_days_late, total_days_half_day,
-          total_hours, overtime_hours,
-          base_pay, total_overtime_pay, total_deductions,
-          gross_pay, net_pay,
-          hourly_rate_snapshot, status, generated_by
+          employee_id,
+          period_year, period_month, period_label,
+          working_days_in_month,
+          days_present, days_absent, days_leave,
+          total_hours,
+          monthly_salary, daily_rate, hourly_rate,
+          gross_pay,
+          status, generated_by
         ) VALUES (
-          $1, $2, $3,
-          $4, $5, $6, $7, $8,
-          $9, $10,
-          $11, $12, $13,
-          $14, $15,
-          $16, 'draft', $17
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'draft', $14
         )
-        ON CONFLICT (employee_id, period_start, period_end)
-        DO UPDATE SET
-          total_days_present  = EXCLUDED.total_days_present,
-          total_days_absent   = EXCLUDED.total_days_absent,
-          total_days_leave    = EXCLUDED.total_days_leave,
-          total_days_late     = EXCLUDED.total_days_late,
-          total_days_half_day = EXCLUDED.total_days_half_day,
-          total_hours         = EXCLUDED.total_hours,
-          overtime_hours      = EXCLUDED.overtime_hours,
-          base_pay            = EXCLUDED.base_pay,
-          total_overtime_pay  = EXCLUDED.total_overtime_pay,
-          total_deductions    = EXCLUDED.total_deductions,
-          gross_pay           = EXCLUDED.gross_pay,
-          net_pay             = EXCLUDED.net_pay,
-          hourly_rate_snapshot = EXCLUDED.hourly_rate_snapshot,
-          status              = 'draft',
-          generated_by        = EXCLUDED.generated_by,
-          updated_at          = NOW()
+        ON CONFLICT (employee_id, period_year, period_month) DO UPDATE SET
+          working_days_in_month = EXCLUDED.working_days_in_month,
+          days_present          = EXCLUDED.days_present,
+          days_absent           = EXCLUDED.days_absent,
+          days_leave            = EXCLUDED.days_leave,
+          total_hours           = EXCLUDED.total_hours,
+          monthly_salary        = EXCLUDED.monthly_salary,
+          daily_rate            = EXCLUDED.daily_rate,
+          hourly_rate           = EXCLUDED.hourly_rate,
+          gross_pay             = EXCLUDED.gross_pay,
+          status                = 'draft',
+          generated_by          = EXCLUDED.generated_by,
+          updated_at            = NOW()
         RETURNING *
       `,
         [
           emp.id,
-          dto.period_start,
-          dto.period_end,
+          dto.period_year,
+          dto.period_month,
+          periodLabel,
+          dto.working_days_in_month,
           a.days_present,
           a.days_absent,
           a.days_leave,
-          a.days_late,
-          a.days_half_day,
           a.total_hours,
-          a.overtime_hours,
-          base_pay,
-          a.total_overtime_pay,
-          a.total_deductions,
-          gross_pay,
-          net_pay,
-          emp.hourly_rate,
+          monthlySalary,
+          daily_rate,
+          hourly_rate,
+          a.gross_pay,
           actorId,
         ]
       );

@@ -13,56 +13,30 @@ const pool = new Pool({
 
 async function seed() {
   const client = await pool.connect();
-
   try {
     await client.query("BEGIN");
 
-    // ── 1. Default shift rule ──────────────────────────────────────────────
-    const shiftResult = await client.query(`
-      INSERT INTO shift_rules (
-        name, shift_start, shift_end, standard_hours,
-        overtime_threshold, overtime_multiplier,
-        late_deduction_per_min, is_default
-      )
+    const result = await client.query(`
+      INSERT INTO employees
+        (employee_code, full_name, phone, position, department, monthly_salary)
       VALUES
-        ('Standard (9–6)', '09:00', '18:00', 8.00, 8.00, 1.50, 0.50, TRUE),
-        ('Early shift (7–4)', '07:00', '16:00', 8.00, 8.00, 1.50, 0.50, FALSE)
-      ON CONFLICT DO NOTHING
-      RETURNING id, name
-    `);
-    console.log(
-      "Shift rules seeded:",
-      shiftResult.rows.map((r) => r.name)
-    );
-
-    // Get the default shift id
-    const { rows: defaultShift } = await client.query(
-      `SELECT id FROM shift_rules WHERE is_default = TRUE LIMIT 1`
-    );
-    const defaultShiftId = defaultShift[0]?.id;
-
-    // ── 2. Sample employees ────────────────────────────────────────────────
-    const empResult = await client.query(
-      `
-      INSERT INTO employees (
-        employee_code, full_name, phone,
-        position, department, hourly_rate, shift_id
-      )
-      VALUES
-        ('EMP001', 'Alice Rahman',   '+60123456789', 'Senior Developer',  'Engineering', 45.00, $1),
-        ('EMP002', 'Bob Tan',        '+60198765432', 'UI Designer',        'Design',      38.00, $1),
-        ('EMP003', 'Carol Singh',    '+60112223334', 'Project Manager',    'Management',  55.00, $1),
-        ('EMP004', 'David Lim',      '+60145556667', 'Junior Developer',   'Engineering', 28.00, $1),
-        ('EMP005', 'Eva Krishnan',   '+60167778889', 'QA Engineer',        'Engineering', 32.00, $1)
+        ('EMP001', 'Alice Rahman',  '+60123456789', 'Senior Developer', 'Engineering', 8000.00),
+        ('EMP002', 'Bob Tan',       '+60198765432', 'UI Designer',       'Design',      6500.00),
+        ('EMP003', 'Carol Singh',   '+60112223334', 'Project Manager',   'Management',  9500.00),
+        ('EMP004', 'David Lim',     '+60145556667', 'Junior Developer',  'Engineering', 4500.00),
+        ('EMP005', 'Eva Krishnan',  '+60167778889', 'QA Engineer',       'Engineering', 5500.00)
       ON CONFLICT (employee_code) DO NOTHING
-      RETURNING employee_code, full_name
-    `,
-      [defaultShiftId]
-    );
-    console.log(
-      "Employees seeded:",
-      empResult.rows.map((r) => `${r.employee_code} ${r.full_name}`)
-    );
+      RETURNING employee_code, full_name, monthly_salary
+    `);
+
+    console.log("Employees seeded:");
+    result.rows.forEach((r) => {
+      const daily = (r.monthly_salary / 26).toFixed(2);
+      const hourly = (r.monthly_salary / 26 / 8).toFixed(2);
+      console.log(
+        `  ${r.employee_code}  ${r.full_name}  | monthly: ${r.monthly_salary}  daily: ${daily}  hourly: ${hourly}`
+      );
+    });
 
     await client.query("COMMIT");
     console.log("\nSeed complete.");
@@ -76,7 +50,4 @@ async function seed() {
   }
 }
 
-seed().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+seed().catch(() => process.exit(1));
