@@ -144,6 +144,7 @@ export async function updateEmployee(
   res: Response,
   next: NextFunction
 ) {
+  console.log("req.body:", req.body);
   try {
     const d: UpdateEmployeeDTO = req.body ?? {};
     const { rows } = await query(
@@ -218,7 +219,7 @@ export async function logAttendance(
 ) {
   try {
     const dto: CreateAttendanceDTO = req.body;
-    const actorId = (req as Request & { userId?: string }).userId ?? "system";
+    const actorId = (req as Request & { userId?: string }).userId ?? null;
     const log = await AttendanceService.createAttendanceLog(dto, actorId);
     ok(res, log, 201);
   } catch (err) {

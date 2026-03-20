@@ -13,7 +13,6 @@ export interface Employee {
   joined_at: string;
   created_at: Date;
   updated_at: Date;
-  // derived — not stored, computed on read
   daily_rate?: number;
   hourly_rate?: number;
 }
@@ -68,8 +67,6 @@ export interface SalaryRecord {
   >;
 }
 
-// ── DTOs ───────────────────────────────────────────────────────────────────
-
 export interface CreateEmployeeDTO {
   employee_code: string;
   full_name: string;
@@ -91,11 +88,10 @@ export interface UpdateEmployeeDTO {
 
 export interface CreateAttendanceDTO {
   employee_id: string;
-  log_date: string; // "YYYY-MM-DD"
-  clock_in?: string; // "HH:MM"
-  clock_out?: string; // "HH:MM"
+  log_date: string;
+  clock_in?: string;
+  clock_out?: string;
   status: AttendanceStatus;
-  working_days_in_month?: number; // defaults to 26
   notes?: string;
 }
 
@@ -103,18 +99,14 @@ export interface UpdateAttendanceDTO {
   clock_in?: string;
   clock_out?: string;
   status?: AttendanceStatus;
-  working_days_in_month?: number;
   notes?: string;
 }
 
 export interface GeneratePayrollDTO {
   period_year: number;
   period_month: number;
-  working_days_in_month: number; // admin sets this per month (e.g. 26)
-  employee_ids?: string[]; // empty = all active employees
+  employee_ids?: string[];
 }
-
-// ── Calculation result ─────────────────────────────────────────────────────
 
 export interface DayCalculation {
   hours_worked: number;
@@ -124,8 +116,6 @@ export interface DayCalculation {
   hourly_rate: number;
   day_pay: number;
 }
-
-// ── Query helpers ──────────────────────────────────────────────────────────
 
 export interface PaginatedResult<T> {
   data: T[];

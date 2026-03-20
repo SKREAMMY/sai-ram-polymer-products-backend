@@ -9,14 +9,38 @@ import {
   PaginatedResult,
 } from "../types/attendance.types";
 
-const DEFAULT_WORKING_DAYS = 26;
 const HOURS_PER_DAY = 8;
+
+// ── Working days calculator (Mon-Sat, Sundays off) ────────────────────────
+//
+// Counts every day in the month that is NOT a Sunday.
+// e.g. March 2026 -> 27 working days
+
+export function getWorkingDaysInMonth(year: number, month: number): number {
+  const daysInMonth = new Date(year, month, 0).getDate(); // month is 1-based here
+  let workingDays = 0;
+  for (let day = 1; day <= daysInMonth; day++) {
+    const date = new Date(year, month - 1, day);
+    if (date.getDay() !== 0) {
+      // 0 = Sunday
+      workingDays++;
+    }
+  }
+  return workingDays;
+}
+
+// Derive year and month from a "YYYY-MM-DD" date string
+function workingDaysFromDate(logDate: string): number {
+  const [year, month] = logDate.split("-").map(Number);
+  return getWorkingDaysInMonth(year, month);
+}
 
 // ── Core calculation (pure function) ──────────────────────────────────────
 //
-//   monthly_salary / working_days_in_month = daily_rate
-//   daily_rate / 8                         = hourly_rate
-//   hourly_rate * hours_worked             = day_pay
+//   working_days  = all Mon-Sat days in the month (auto-calculated)
+//   daily_rate    = monthly_salary / working_days
+//   hourly_rate   = daily_rate / 8
+//   day_pay       = hourly_rate * hours_worked
 
 export function calculateDayPay(
   monthlySalary: number,
@@ -49,7 +73,7 @@ export function calculateDayPay(
 
 export async function createAttendanceLog(
   dto: CreateAttendanceDTO,
-  actorId: string
+  actorId: string | null
 ): Promise<AttendanceLog> {
   return withTransaction(async (client) => {
     const { rows: existing } = await client.query(
@@ -69,8 +93,7 @@ export async function createAttendanceLog(
     if (!empRows[0]) throw new Error("Employee not found or inactive");
 
     const monthlySalary = Number(empRows[0].monthly_salary);
-    const workingDaysInMonth =
-      dto.working_days_in_month ?? DEFAULT_WORKING_DAYS;
+    const workingDaysInMonth = workingDaysFromDate(dto.log_date);
 
     let calc: DayCalculation = {
       hours_worked: 0,
@@ -138,7 +161,7 @@ export async function createAttendanceLog(
 export async function updateAttendanceLog(
   logId: string,
   dto: UpdateAttendanceDTO,
-  actorId: string
+  actorId: string | null
 ): Promise<AttendanceLog> {
   return withTransaction(async (client) => {
     const { rows: existing } = await client.query(
@@ -151,22 +174,22 @@ export async function updateAttendanceLog(
     const newStatus = dto.status ?? current.status;
     const newClockIn = dto.clock_in ?? current.clock_in;
     const newClockOut = dto.clock_out ?? current.clock_out;
-    const workingDays =
-      dto.working_days_in_month ?? current.working_days_in_month;
 
     const { rows: empRows } = await client.query(
       "SELECT monthly_salary FROM employees WHERE id = $1",
       [current.employee_id]
     );
     const monthlySalary = Number(empRows[0].monthly_salary);
+    const workingDaysInMonth = workingDaysFromDate(current.log_date);
 
     let calc: DayCalculation = {
       hours_worked: 0,
-      working_days_in_month: workingDays,
+      working_days_in_month: workingDaysInMonth,
       monthly_salary: monthlySalary,
-      daily_rate: Math.round((monthlySalary / workingDays) * 100) / 100,
+      daily_rate: Math.round((monthlySalary / workingDaysInMonth) * 100) / 100,
       hourly_rate:
-        Math.round((monthlySalary / workingDays / HOURS_PER_DAY) * 100) / 100,
+        Math.round((monthlySalary / workingDaysInMonth / HOURS_PER_DAY) * 100) /
+        100,
       day_pay: 0,
     };
 
@@ -178,7 +201,7 @@ export async function updateAttendanceLog(
       }
       calc = calculateDayPay(
         monthlySalary,
-        workingDays,
+        workingDaysInMonth,
         newClockIn,
         newClockOut
       );
@@ -246,7 +269,7 @@ export async function getDailyAttendance(
   return rows;
 }
 
-// ── Get attendance for one employee (date range) ───────────────────────────
+// ── Get attendance for one employee (date range) ──────────────────────────
 
 export async function getEmployeeAttendance(
   employeeId: string,
@@ -287,7 +310,7 @@ export async function getEmployeeAttendance(
 
 export async function generatePayroll(
   dto: GeneratePayrollDTO,
-  actorId: string
+  actorId: string | null
 ): Promise<SalaryRecord[]> {
   return withTransaction(async (client) => {
     const periodLabel = `${dto.period_year}-${String(dto.period_month).padStart(
@@ -298,6 +321,10 @@ export async function generatePayroll(
     const periodEnd = new Date(dto.period_year, dto.period_month, 0)
       .toISOString()
       .slice(0, 10);
+    const workingDaysInMonth = getWorkingDaysInMonth(
+      dto.period_year,
+      dto.period_month
+    );
 
     let empQuery =
       "SELECT id, full_name, monthly_salary FROM employees WHERE is_active = TRUE";
@@ -315,8 +342,8 @@ export async function generatePayroll(
     for (const emp of employees) {
       const monthlySalary = Number(emp.monthly_salary);
       const daily_rate =
-        Math.round((monthlySalary / dto.working_days_in_month) * 100) / 100;
-      const hourly_rate = Math.round((daily_rate / 8) * 100) / 100;
+        Math.round((monthlySalary / workingDaysInMonth) * 100) / 100;
+      const hourly_rate = Math.round((daily_rate / HOURS_PER_DAY) * 100) / 100;
 
       const { rows: agg } = await client.query(
         `
@@ -344,8 +371,7 @@ export async function generatePayroll(
           days_present, days_absent, days_leave,
           total_hours,
           monthly_salary, daily_rate, hourly_rate,
-          gross_pay,
-          status, generated_by
+          gross_pay, status, generated_by
         ) VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'draft', $14
         )
@@ -369,7 +395,7 @@ export async function generatePayroll(
           dto.period_year,
           dto.period_month,
           periodLabel,
-          dto.working_days_in_month,
+          workingDaysInMonth,
           a.days_present,
           a.days_absent,
           a.days_leave,
