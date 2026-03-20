@@ -1,17 +1,18 @@
 import express from "express";
-import cors from "cors";
-import * as dotenv from "dotenv";
 import helmet from "helmet";
+import cors from "cors";
 import rateLimit from "express-rate-limit";
-import pool from "./config/db";
+import * as dotenv from "dotenv";
+
+import attendanceRoutes from "./routes/attendance.routes";
+import { errorHandler } from "./middleware/errorHandler";
 
 dotenv.config();
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-// security middleware
-
+// ── Security middleware ────────────────────────────────────────────────────
 app.use(helmet());
 app.use(
   cors({
@@ -20,8 +21,7 @@ app.use(
   })
 );
 
-// rate limiting
-
+// ── Rate limiting ──────────────────────────────────────────────────────────
 app.use(
   rateLimit({
     windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
@@ -31,31 +31,40 @@ app.use(
   })
 );
 
+// ── Body parsing ───────────────────────────────────────────────────────────
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-app.get("/", (req, res) => {
-  res.send("Hello");
+// ── Request logging (dev only) ─────────────────────────────────────────────
+if (process.env.NODE_ENV === "development") {
+  app.use((req, _res, next) => {
+    console.log(`${new Date().toISOString()}  ${req.method}  ${req.path}`);
+    next();
+  });
+}
+
+// ── Health check ───────────────────────────────────────────────────────────
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// test db connection
-app.get("/db-test", async (req, res) => {
-  try {
-    const result = await pool.query("SELECT NOW()");
-    res.json({
-      success: true,
-      time: result.rows[0],
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({
-      success: false,
-      error: err.message,
-    });
-  }
+// ── API routes ─────────────────────────────────────────────────────────────
+// All attendance routes live under /api/v1
+// Other features (invoices, quotations, clients) will be mounted here later
+app.use("/api/v1", attendanceRoutes);
+
+// ── 404 handler ────────────────────────────────────────────────────────────
+app.use((_req, res) => {
+  res.status(404).json({ success: false, message: "Route not found" });
 });
 
+// ── Global error handler (must be last) ───────────────────────────────────
+app.use(errorHandler);
+
+// ── Start ──────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`server is running at port ${PORT}`);
+  console.log(`Server running on http://localhost:${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
 });
+
+export default app;
