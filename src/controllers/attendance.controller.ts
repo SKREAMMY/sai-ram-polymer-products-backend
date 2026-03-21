@@ -113,6 +113,20 @@ export async function createEmployee(
     if (!d.monthly_salary || d.monthly_salary <= 0) {
       return fail(res, "monthly_salary is required and must be greater than 0");
     }
+
+    // Auto-generate employee code: find highest existing EMP number and increment
+    const { rows: codeRows } = await query(`
+  SELECT employee_code FROM employees
+  WHERE employee_code ~ '^EMP[0-9]+$'
+  ORDER BY LENGTH(employee_code) DESC,
+           employee_code DESC
+  LIMIT 1
+`);
+    const lastNum = codeRows[0]
+      ? parseInt(codeRows[0].employee_code.replace("EMP", ""), 10)
+      : 0;
+    const newCode = `EMP${String(lastNum + 1).padStart(3, "0")}`;
+
     const { rows } = await query(
       `
       INSERT INTO employees
@@ -124,7 +138,7 @@ export async function createEmployee(
         ROUND((monthly_salary / 26 / 8), 2) AS hourly_rate
     `,
       [
-        d.employee_code,
+        newCode,
         d.full_name,
         d.phone ?? null,
         d.position ?? null,

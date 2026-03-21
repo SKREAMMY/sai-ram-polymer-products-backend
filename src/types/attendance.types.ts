@@ -68,7 +68,6 @@ export interface SalaryRecord {
 }
 
 export interface CreateEmployeeDTO {
-  employee_code: string;
   full_name: string;
   phone?: string;
   position?: string;
