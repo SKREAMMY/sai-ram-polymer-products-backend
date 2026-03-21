@@ -144,7 +144,6 @@ export async function updateEmployee(
   res: Response,
   next: NextFunction
 ) {
-  console.log("req.body:", req.body);
   try {
     const d: UpdateEmployeeDTO = req.body ?? {};
     const { rows } = await query(
@@ -219,7 +218,7 @@ export async function logAttendance(
 ) {
   try {
     const dto: CreateAttendanceDTO = req.body;
-    const actorId = (req as Request & { userId?: string }).userId ?? null;
+    const actorId = (req as Request & { userId?: string }).userId ?? "system";
     const log = await AttendanceService.createAttendanceLog(dto, actorId);
     ok(res, log, 201);
   } catch (err) {
@@ -378,6 +377,46 @@ export async function getDailySummary(
       [date]
     );
     ok(res, { date, ...rows[0] });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getEmployeePayrollByMonth(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const [year, month] = param(req, "period").split("-");
+    const employeeId = param(req, "employeeId");
+
+    const { rows } = await query(
+      `
+      SELECT
+        sr.*,
+        json_build_object(
+          'id',            e.id,
+          'full_name',     e.full_name,
+          'employee_code', e.employee_code,
+          'department',    e.department
+        ) AS employee
+      FROM salary_records sr
+      JOIN employees e ON e.id = sr.employee_id
+      WHERE sr.period_year  = $1
+        AND sr.period_month = $2
+        AND sr.employee_id  = $3
+    `,
+      [year, month, employeeId]
+    );
+
+    if (!rows[0])
+      return fail(
+        res,
+        "No payroll record found for this employee and period",
+        404
+      );
+    ok(res, rows[0]);
   } catch (err) {
     next(err);
   }

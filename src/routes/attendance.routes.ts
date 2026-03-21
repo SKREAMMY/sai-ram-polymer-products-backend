@@ -20,6 +20,10 @@ router.get("/attendance/daily", C.getDailyAttendance);
 // ── Payroll ────────────────────────────────────────────────────────────────
 router.post("/payroll/generate", C.generatePayroll);
 router.get("/payroll/:period", C.getPayrollByMonth);
+router.get(
+  "/payroll/:period/employee/:employeeId",
+  C.getEmployeePayrollByMonth
+);
 
 // ── Reports ────────────────────────────────────────────────────────────────
 router.get("/reports/daily", C.getDailySummary);

@@ -30,8 +30,10 @@ export function getWorkingDaysInMonth(year: number, month: number): number {
 }
 
 // Derive year and month from a "YYYY-MM-DD" date string
-function workingDaysFromDate(logDate: string): number {
-  const [year, month] = logDate.split("-").map(Number);
+function workingDaysFromDate(logDate: string | Date): number {
+  const dateStr =
+    logDate instanceof Date ? logDate.toISOString().slice(0, 10) : logDate;
+  const [year, month] = dateStr.split("-").map(Number);
   return getWorkingDaysInMonth(year, month);
 }
 
