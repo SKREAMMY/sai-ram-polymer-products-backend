@@ -5,6 +5,8 @@ import rateLimit from "express-rate-limit";
 import * as dotenv from "dotenv";
 
 import attendanceRoutes from "./routes/attendance.routes";
+import authRoutes from "./routes/auth.routes";
+import { authenticate } from "./middleware/authenticate";
 import { errorHandler } from "./middleware/errorHandler";
 
 dotenv.config();
@@ -12,7 +14,6 @@ dotenv.config();
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-// ── Security middleware ────────────────────────────────────────────────────
 app.use(helmet());
 app.use(
   cors({
@@ -21,7 +22,6 @@ app.use(
   })
 );
 
-// ── Rate limiting ──────────────────────────────────────────────────────────
 app.use(
   rateLimit({
     windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
@@ -31,11 +31,9 @@ app.use(
   })
 );
 
-// ── Body parsing ───────────────────────────────────────────────────────────
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ── Request logging (dev only) ─────────────────────────────────────────────
 if (process.env.NODE_ENV === "development") {
   app.use((req, _res, next) => {
     console.log(`${new Date().toISOString()}  ${req.method}  ${req.path}`);
@@ -43,25 +41,22 @@ if (process.env.NODE_ENV === "development") {
   });
 }
 
-// ── Health check ───────────────────────────────────────────────────────────
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// ── API routes ─────────────────────────────────────────────────────────────
-// All attendance routes live under /api/v1
-// Other features (invoices, quotations, clients) will be mounted here later
-app.use("/api/v1", attendanceRoutes);
+// Public routes — no auth needed
+app.use("/api/v1", authRoutes);
 
-// ── 404 handler ────────────────────────────────────────────────────────────
+// Protected routes — all attendance endpoints require a valid JWT
+app.use("/api/v1", authenticate, attendanceRoutes);
+
 app.use((_req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });
 
-// ── Global error handler (must be last) ───────────────────────────────────
 app.use(errorHandler);
 
-// ── Start ──────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
