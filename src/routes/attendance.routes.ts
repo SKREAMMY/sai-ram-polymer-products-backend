@@ -27,5 +27,7 @@ router.get(
 
 // ── Reports ────────────────────────────────────────────────────────────────
 router.get("/reports/daily", C.getDailySummary);
+router.patch("/payroll/:id/approve", C.approvePayroll);
+router.patch("/payroll/:id/paid", C.markPayrollPaid);
 
 export default router;

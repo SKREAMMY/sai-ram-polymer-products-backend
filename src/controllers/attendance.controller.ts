@@ -116,16 +116,14 @@ export async function createEmployee(
 
     // Auto-generate employee code: find highest existing EMP number and increment
     const { rows: codeRows } = await query(`
-  SELECT employee_code FROM employees
-  WHERE employee_code ~ '^EMP[0-9]+$'
-  ORDER BY LENGTH(employee_code) DESC,
-           employee_code DESC
-  LIMIT 1
-`);
-    const lastNum = codeRows[0]
-      ? parseInt(codeRows[0].employee_code.replace("EMP", ""), 10)
-      : 0;
-    const newCode = `EMP${String(lastNum + 1).padStart(3, "0")}`;
+      SELECT employee_code FROM employees
+      WHERE employee_code ~ '^EMP[0-9]+$'
+      ORDER BY CAST(SUBSTRING(employee_code FROM 4) AS INT) DESC
+      LIMIT 1
+    `);
+    const lastCode = codeRows[0]?.employee_code ?? "EMP000";
+    const lastNum = parseInt(lastCode.replace("EMP", ""), 10);
+    const newCode = `EMP\${String(lastNum + 1).padStart(3, '0')}`;
 
     const { rows } = await query(
       `
@@ -430,6 +428,56 @@ export async function getEmployeePayrollByMonth(
         "No payroll record found for this employee and period",
         404
       );
+    ok(res, rows[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function approvePayroll(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const { rows } = await query(
+      `
+      UPDATE salary_records SET status = 'approved', updated_at = NOW()
+      WHERE id = $1 AND status = 'draft'
+      RETURNING *,
+        (SELECT json_build_object(
+          'id', e.id, 'full_name', e.full_name,
+          'employee_code', e.employee_code, 'department', e.department
+        ) FROM employees e WHERE e.id = salary_records.employee_id) AS employee
+    `,
+      [param(req, "id")]
+    );
+    if (!rows[0]) return fail(res, "Record not found or already approved", 404);
+    ok(res, rows[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function markPayrollPaid(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const { rows } = await query(
+      `
+      UPDATE salary_records SET status = 'paid', paid_at = NOW(), updated_at = NOW()
+      WHERE id = $1 AND status = 'approved'
+      RETURNING *,
+        (SELECT json_build_object(
+          'id', e.id, 'full_name', e.full_name,
+          'employee_code', e.employee_code, 'department', e.department
+        ) FROM employees e WHERE e.id = salary_records.employee_id) AS employee
+    `,
+      [param(req, "id")]
+    );
+    if (!rows[0]) return fail(res, "Record not found or not approved yet", 404);
     ok(res, rows[0]);
   } catch (err) {
     next(err);
