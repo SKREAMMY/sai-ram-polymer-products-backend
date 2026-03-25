@@ -123,7 +123,10 @@ export async function createEmployee(
     `);
     const lastCode = codeRows[0]?.employee_code ?? "EMP000";
     const lastNum = parseInt(lastCode.replace("EMP", ""), 10);
-    const newCode = `EMP\${String(lastNum + 1).padStart(3, '0')}`;
+    const nextNum = lastNum + 1;
+    const newCode = "EMP" + String(nextNum).padStart(3, "0");
+    console.log("Generated code:", newCode);
+    console.log("Last code from DB:", codeRows[0]?.employee_code);
 
     const { rows } = await query(
       `

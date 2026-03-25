@@ -1,6 +1,6 @@
 import express from "express";
-import helmet from "helmet";
 import cors from "cors";
+import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import * as dotenv from "dotenv";
 
@@ -14,13 +14,17 @@ dotenv.config();
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
+const corsOptions = {
+  origin: process.env.CLIENT_URL || "http://localhost:5173",
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
+
 app.use(helmet());
-app.use(
-  cors({
-    origin: process.env.CLIENT_URL || "http://localhost:5173",
-    credentials: true,
-  })
-);
 
 app.use(
   rateLimit({
@@ -45,10 +49,7 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// Public routes — no auth needed
 app.use("/api/v1", authRoutes);
-
-// Protected routes — all attendance endpoints require a valid JWT
 app.use("/api/v1", authenticate, attendanceRoutes);
 
 app.use((_req, res) => {
